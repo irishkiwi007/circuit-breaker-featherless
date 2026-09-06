@@ -20,6 +20,7 @@ from config import CONFIG
 from agent_layer.llm_client import get_client
 from agent_layer.tools import TOOL_SCHEMAS, ToolDispatcher
 from agent_layer.autonomous_prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
+from agent_layer.remote_feedback import fetch_and_consume_remote_notes
 from execution.alpaca_client import AlpacaExecutionClient
 from execution.trade_logger import log_event
 
@@ -31,18 +32,28 @@ PERFORMANCE_REFLECTION_PATH = os.path.join(os.path.dirname(os.path.dirname(os.pa
 
 def _consume_operator_note() -> str:
     """
-    If a note has been left (see deploy/DEPLOY.md), read it, delete the
-    file so it's only injected once, and return its text. Lets the
-    operator correct a factual error or flag something without needing
-    to stop and restart the whole process — the note becomes part of
-    the very next cycle's opening message.
+    Combines the local OPERATOR_NOTE file (see deploy/DEPLOY.md — write
+    it directly when SSHed into the VM) with any remote notes submitted
+    via the dashboard's passcode-gated feedback box (see
+    agent_layer/remote_feedback.py). Both are one-shot: the local file
+    is deleted after reading, and remote notes arrive as GitHub issues
+    that get closed immediately after being read, so neither channel
+    re-injects the same note on a later cycle.
     """
-    if not os.path.exists(OPERATOR_NOTE_PATH):
-        return ""
-    with open(OPERATOR_NOTE_PATH, "r") as f:
-        note = f.read().strip()
-    os.remove(OPERATOR_NOTE_PATH)
-    return note
+    parts = []
+
+    if os.path.exists(OPERATOR_NOTE_PATH):
+        with open(OPERATOR_NOTE_PATH, "r") as f:
+            local_note = f.read().strip()
+        os.remove(OPERATOR_NOTE_PATH)
+        if local_note:
+            parts.append(local_note)
+
+    remote_note = fetch_and_consume_remote_notes()
+    if remote_note:
+        parts.append(remote_note)
+
+    return "\n\n".join(parts)
 
 
 def _read_performance_reflection() -> str:

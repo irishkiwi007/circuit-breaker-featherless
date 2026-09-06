@@ -90,6 +90,13 @@ FEATHERLESS_API_KEY = st.secrets.get("FEATHERLESS_API_KEY", "")
 FEATHERLESS_BASE_URL = st.secrets.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1")
 LLM_MODEL = st.secrets.get("LLM_MODEL", "deepseek-ai/DeepSeek-V4-Pro")
 
+# Remote operator-feedback channel — see agent_layer/remote_feedback.py
+# on the VM side. GITHUB_TOKEN here only needs Issues: read+write on
+# this one repo (a fine-grained PAT), nothing broader.
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+GITHUB_REPO = st.secrets.get("GITHUB_REPO", "irishkiwi007/circuit-breaker-featherless")
+DASHBOARD_FEEDBACK_PASSCODE = st.secrets.get("DASHBOARD_FEEDBACK_PASSCODE", "")
+
 NYC_TZ = ZoneInfo("America/New_York")
 
 
@@ -404,6 +411,31 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
         ],
     )
     return (response.choices[0].message.content or "").strip()
+
+
+def submit_operator_note(note_text: str) -> None:
+    """
+    Creates a GitHub issue labeled "operator-note" — the live agent
+    (agent_layer/remote_feedback.py, on the VM) polls for these each
+    cycle, injects the text directly into its own decision-making
+    context, and closes the issue so it's read only once. Raises on
+    any failure so the caller can show a real error rather than a
+    false "sent" confirmation.
+    """
+    resp = requests.post(
+        f"https://api.github.com/repos/{GITHUB_REPO}/issues",
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        },
+        json={
+            "title": "Operator note from dashboard",
+            "body": note_text,
+            "labels": ["operator-note"],
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
 
 
 # =================================================================
@@ -864,6 +896,44 @@ else:
         with st.container(border=True):
             st.markdown(f"**Q: {pair['q']}**")
             st.write(pair["a"])
+
+st.divider()
+
+st.subheader("🔒 Leave Feedback for the Agent")
+st.write(
+    "Unlike the Q&A above, this actually reaches the live trading agent's own decision-making "
+    "context on its next cycle — passcode required, since this box is publicly visible."
+)
+
+if not GITHUB_TOKEN or not DASHBOARD_FEEDBACK_PASSCODE:
+    st.info("Operator feedback isn't configured on this dashboard yet.")
+else:
+    if "feedback_sent" not in st.session_state:
+        st.session_state.feedback_sent = False
+
+    with st.form("operator_note_form", clear_on_submit=True):
+        entered_passcode = st.text_input("Passcode", type="password")
+        note_text = st.text_area(
+            "Note for the agent",
+            placeholder="e.g. Widen the IV rank filter today, or: hold off on new NVDA positions until further notice.",
+        )
+        submitted = st.form_submit_button("Send to agent", type="primary")
+
+    if submitted:
+        if entered_passcode != DASHBOARD_FEEDBACK_PASSCODE:
+            st.error("Incorrect passcode.")
+        elif not note_text.strip():
+            st.warning("Note is empty — nothing sent.")
+        else:
+            try:
+                submit_operator_note(note_text.strip())
+                st.session_state.feedback_sent = True
+            except Exception as e:
+                st.error(f"Couldn't send that to the agent right now: {e}")
+
+    if st.session_state.feedback_sent:
+        st.success("Sent — the agent will read this at the start of its next decision cycle.")
+        st.session_state.feedback_sent = False
 
 st.divider()
 
