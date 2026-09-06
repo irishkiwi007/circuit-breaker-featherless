@@ -17,11 +17,10 @@ from collections import Counter
 from dataclasses import asdict, fields
 from typing import Optional
 
-import anthropic
-
 from config import CONFIG
 from config.dynamic_overrides import ADJUSTABLE_BOUNDS, apply_override, load_overrides
 from execution.trade_logger import read_events, log_event
+from agent_layer.llm_client import get_client
 from agent_layer.rules_review_prompts import RULES_REVIEW_SYSTEM_PROMPT, build_review_prompt
 from agent_layer.claude_agent import _strip_code_fences
 
@@ -53,7 +52,7 @@ def _summarize_recent_activity(limit: int = 200) -> dict:
 class RulesReviewAgent:
     def __init__(self, config=CONFIG):
         self.config = config
-        self._client = anthropic.Anthropic(api_key=config.claude.api_key)
+        self._client = get_client(config)
 
     def review(self) -> dict:
         """

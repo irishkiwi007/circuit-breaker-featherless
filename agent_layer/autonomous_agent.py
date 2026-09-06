@@ -14,9 +14,9 @@ inside agent_layer/tools.py itself.
 """
 import re
 import os
-import anthropic
 
 from config import CONFIG
+from agent_layer.llm_client import get_client
 from agent_layer.tools import TOOL_SCHEMAS, ToolDispatcher
 from agent_layer.autonomous_prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
 from execution.trade_logger import log_event
@@ -60,7 +60,7 @@ def _read_performance_reflection() -> str:
 class AutonomousTradingAgent:
     def __init__(self, config=CONFIG):
         self.config = config
-        self._client = anthropic.Anthropic(api_key=config.claude.api_key)
+        self._client = get_client(config)
         self._dispatcher = ToolDispatcher(config)
 
     async def run_cycle(self) -> int:
@@ -69,8 +69,13 @@ class AutonomousTradingAgent:
         until the next cycle should run, as chosen by Claude (or a
         default if parsing fails or the key is missing).
         """
-        if not self.config.claude.api_key:
-            log_event("autonomous_cycle_skipped", {"reason": "ANTHROPIC_API_KEY not configured"})
+        provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+        key_configured = (
+            bool(os.getenv("FEATHERLESS_API_KEY")) if provider == "featherless"
+            else bool(self.config.claude.api_key)
+        )
+        if not key_configured:
+            log_event("autonomous_cycle_skipped", {"reason": f"{provider} API key not configured"})
             return DEFAULT_NEXT_CHECK_MINUTES
 
         log_event("autonomous_cycle_start", {})

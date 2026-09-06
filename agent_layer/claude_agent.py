@@ -6,11 +6,11 @@ reasons about *whether to take* a trade the rules engine already found,
 not about market microstructure in real time.
 """
 import json
+import os
 from dataclasses import dataclass
 
-import anthropic
-
 from config import CONFIG
+from agent_layer.llm_client import get_client
 from fast_layer.signal_generator import SpreadCandidate
 from agent_layer.prompts import SYSTEM_PROMPT, build_user_prompt
 
@@ -43,16 +43,21 @@ class AgentDecision:
 class TradeReviewAgent:
     def __init__(self, config=CONFIG):
         self.config = config
-        self._client = anthropic.Anthropic(api_key=config.claude.api_key)
+        self._client = get_client(config)
         self._calls_this_session = 0
 
     def review(self, candidate: SpreadCandidate, market_context: dict) -> AgentDecision:
-        if not self.config.claude.api_key:
+        provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+        key_configured = (
+            bool(os.getenv("FEATHERLESS_API_KEY")) if provider == "featherless"
+            else bool(self.config.claude.api_key)
+        )
+        if not key_configured:
             return AgentDecision(
                 decision="reject",
                 contracts=0,
                 confidence=0.0,
-                reasoning="ANTHROPIC_API_KEY not configured; failing closed rather than trading without review.",
+                reasoning=f"{provider} API key not configured; failing closed rather than trading without review.",
             )
 
         if self._calls_this_session >= self.config.strategy.agent_max_calls_per_session:

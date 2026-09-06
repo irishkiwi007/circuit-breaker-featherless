@@ -22,8 +22,15 @@ class AlpacaConfig:
 
 @dataclass(frozen=True)
 class ClaudeConfig:
+    # LLM_PROVIDER selects which backend agent_layer/llm_client.py routes to:
+    # "anthropic" (default) or "featherless". Model string must match the
+    # chosen provider's naming (e.g. "claude-sonnet-4-6" vs
+    # "deepseek-ai/DeepSeek-V4-Pro").
     api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    model: str = os.getenv(
+        "LLM_MODEL",
+        os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+    )
     max_tokens: int = 1500
 
 

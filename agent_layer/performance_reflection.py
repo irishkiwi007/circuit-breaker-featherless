@@ -36,9 +36,8 @@ import json
 import os
 from datetime import datetime, timezone
 
-import anthropic
-
 from config import CONFIG
+from agent_layer.llm_client import get_client
 from execution.trade_logger import log_event, read_events
 
 REFLECTION_NOTE_PATH = os.path.join(
@@ -121,7 +120,7 @@ def _extract_closed_trades(limit: int = 1000) -> list:
 class PerformanceReflectionAgent:
     def __init__(self, config=CONFIG):
         self.config = config
-        self._client = anthropic.Anthropic(api_key=config.claude.api_key)
+        self._client = get_client(config)
 
     def maybe_generate_reflection(self) -> dict:
         """
