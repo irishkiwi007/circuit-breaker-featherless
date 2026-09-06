@@ -14,11 +14,13 @@ inside agent_layer/tools.py itself.
 """
 import re
 import os
+from datetime import datetime, timezone
 
 from config import CONFIG
 from agent_layer.llm_client import get_client
 from agent_layer.tools import TOOL_SCHEMAS, ToolDispatcher
 from agent_layer.autonomous_prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
+from execution.alpaca_client import AlpacaExecutionClient
 from execution.trade_logger import log_event
 
 DEFAULT_NEXT_CHECK_MINUTES = 15
@@ -142,6 +144,7 @@ class AutonomousTradingAgent:
             log_event("autonomous_cycle_max_rounds_hit", {"max_rounds": MAX_TOOL_ROUNDS_PER_CYCLE})
 
         next_check = self._parse_next_check_minutes(final_text)
+        next_check = await self._respect_market_hours(next_check)
         log_event("autonomous_cycle_end", {"summary": final_text[-2000:], "next_check_minutes": next_check})
         return next_check
 
@@ -152,3 +155,45 @@ class AutonomousTradingAgent:
             minutes = int(match.group(1))
             return max(1, min(minutes, 240))  # sane outer bounds: 1 min to 4 hours
         return DEFAULT_NEXT_CHECK_MINUTES
+
+    async def _respect_market_hours(self, llm_next_check: int) -> int:
+        """
+        The LLM's own NEXT_CHECK_MINUTES guess is capped at 4 hours
+        (see _parse_next_check_minutes), which is fine for an active
+        session but means a closed market (evenings, weekends,
+        holidays) gets polled every 4 hours for nothing. If the market
+        is closed, override with the actual time until next_open
+        (from Alpaca's clock, which correctly accounts for holidays)
+        instead of trusting the LLM to reason about calendars.
+        Falls back to the LLM's own figure if the clock call fails,
+        rather than blocking the cycle on it.
+        """
+        try:
+            clock = await AlpacaExecutionClient(self.config).market_clock()
+        except Exception as exc:
+            log_event("market_clock_check_failed", {"error": str(exc)})
+            return llm_next_check
+
+        if clock["is_open"] or not clock.get("next_open"):
+            return llm_next_check
+
+        try:
+            next_open = datetime.fromisoformat(clock["next_open"])
+            now = datetime.now(timezone.utc)
+            minutes_until_open = int((next_open - now).total_seconds() / 60)
+        except (ValueError, TypeError) as exc:
+            log_event("market_clock_parse_failed", {"error": str(exc), "next_open": clock.get("next_open")})
+            return llm_next_check
+
+        # Wake 5 minutes before the bell rather than exactly at it, and
+        # never schedule something nonsensical (negative, or absurdly
+        # long — outer bound of 3 days covers even a long weekend).
+        minutes_until_open = max(1, minutes_until_open - 5)
+        minutes_until_open = min(minutes_until_open, 3 * 24 * 60)
+
+        log_event("market_closed_next_check_overridden", {
+            "llm_suggested_minutes": llm_next_check,
+            "market_next_open": clock["next_open"],
+            "minutes_until_open": minutes_until_open,
+        })
+        return minutes_until_open

@@ -1,0 +1,20 @@
+[Unit]
+Description=Circuit Breaker (Featherless-backed) Options Trading Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/circuit-breaker-featherless
+Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=/home/ubuntu/circuit-breaker-featherless/.env
+ExecStart=/usr/bin/python3 /home/ubuntu/circuit-breaker-featherless/main_autonomous.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=circuit-breaker-featherless
+
+[Install]
+WantedBy=multi-user.target

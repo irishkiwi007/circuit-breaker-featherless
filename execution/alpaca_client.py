@@ -49,6 +49,23 @@ class AlpacaExecutionClient:
                 return data.get("result", [])
             return data if isinstance(data, list) else []
 
+    async def market_clock(self) -> dict:
+        """
+        Alpaca's clock endpoint, via the MCP server's get_clock tool —
+        used in preference to hand-rolled weekday/hour logic because it
+        correctly accounts for market holidays and early closes, not
+        just "is it Mon-Fri 9:30-4."
+        Returns {"is_open": bool, "next_open": iso str, "next_close": iso str}.
+        """
+        async with AlpacaMCPClient(self.config) as mcp:
+            raw = await mcp.call_tool("get_clock", {})
+            data = unwrap_data(raw)
+            return {
+                "is_open": bool(data.get("is_open", False)),
+                "next_open": data.get("next_open"),
+                "next_close": data.get("next_close"),
+            }
+
     async def submit_vertical_spread(
         self,
         short_symbol: str,
