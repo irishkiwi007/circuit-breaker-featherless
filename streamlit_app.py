@@ -27,7 +27,7 @@ reasoning synced yet" rather than erroring.
 import streamlit as st
 import re
 import requests
-import anthropic
+from openai import OpenAI
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -45,7 +45,7 @@ from execution.trade_records import (
     build_trade_records,
 )
 
-st.set_page_config(page_title="Circuit Breaker — Live Demo", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Circuit Breaker (Featherless) — Live Demo", page_icon="⚡", layout="wide")
 
 st.markdown("""
 <style>
@@ -80,13 +80,15 @@ st.markdown("""
 API_KEY = st.secrets.get("ALPACA_API_KEY", "")
 SECRET_KEY = st.secrets.get("ALPACA_SECRET_KEY", "")
 BASE_URL = st.secrets.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
 DATA_URL = st.secrets.get("ALPACA_DATA_URL", "https://data.alpaca.markets")
 
 HEADERS = {
     "APCA-API-KEY-ID": API_KEY,
     "APCA-API-SECRET-KEY": SECRET_KEY,
 }
+FEATHERLESS_API_KEY = st.secrets.get("FEATHERLESS_API_KEY", "")
+FEATHERLESS_BASE_URL = st.secrets.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1")
+LLM_MODEL = st.secrets.get("LLM_MODEL", "deepseek-ai/DeepSeek-V4-Pro")
 
 NYC_TZ = ZoneInfo("America/New_York")
 
@@ -101,7 +103,7 @@ def fetch(base: str, path: str, params: dict = None):
 
 
 REASONING_EXPORT_URL = (
-    "https://raw.githubusercontent.com/irishkiwi007/alpaca-options-agent"
+    "https://raw.githubusercontent.com/irishkiwi007/circuit-breaker-featherless"
     "/main/logs/reasoning_export.json"
 )
 
@@ -392,17 +394,16 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
         "that they don't exist -- but note you can't run them from this Q&A box."
     )
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
         max_tokens=500,
-        system=system_prompt,
-        messages=[{
-            "role": "user",
-            "content": f"Context on your recent activity:\n\n{context}\n\nQuestion: {question}",
-        }],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context on your recent activity:\n\n{context}\n\nQuestion: {question}"},
+        ],
     )
-    return "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+    return (response.choices[0].message.content or "").strip()
 
 
 # =================================================================
@@ -706,7 +707,7 @@ closed_trades = [t for t in trades if t["status"] == "closed"]
 wins = [t for t in closed_trades if t["profit_loss"] == "win"]
 losses = [t for t in closed_trades if t["profit_loss"] == "loss"]
 
-STARTING_EQUITY = 100000.0  # matches the hackathon's required starting balance
+STARTING_EQUITY = 10000.0  # this account's actual starting balance — NOT the hackathon's $100k
 total_realized = (current_equity - STARTING_EQUITY) - open_unrealized
 
 wl1, wl2, wl3, wl4 = st.columns(4)
@@ -845,7 +846,7 @@ st.write("Feel free to ask my AI for information on its trading (note this does 
 if "qa_history" not in st.session_state:
     st.session_state.qa_history = []
 
-if not ANTHROPIC_API_KEY:
+if not FEATHERLESS_API_KEY:
     st.info("Q&A isn't configured on this dashboard yet.")
 else:
     question = st.text_input("Your question", key="qa_question", label_visibility="collapsed",
@@ -870,7 +871,7 @@ st.subheader("What makes this different")
 c1, c2, c3 = st.columns(3)
 with c1:
     st.markdown("**🎯 Genuinely autonomous**")
-    st.write("Claude originates every trade decision directly via Alpaca's MCP server — no rules engine pre-filtering candidates.")
+    st.write("An open-weight model (DeepSeek V4-Pro, via Featherless) originates every trade decision directly via Alpaca's MCP server — no rules engine pre-filtering candidates.")
 with c2:
     st.markdown("**🛡️ Three hard backstops**")
     st.write("Defined-risk-only, spread-economics-sane, and a 15% per-trade sizing cap — enforced in code, not by prompt.")
@@ -879,7 +880,7 @@ with c3:
     st.write("Reviews its own recent activity each cycle and adjusts its own approach — not a fixed script.")
 
 now_nyc = datetime.now(timezone.utc).astimezone(NYC_TZ)
-st.caption(f"Last refreshed: {now_nyc.strftime('%d %m %Y %H:%M')} NYC · [View source on GitHub](https://github.com/irishkiwi007/alpaca-options-agent)")
+st.caption(f"Last refreshed: {now_nyc.strftime('%d %m %Y %H:%M')} NYC · [View source on GitHub](https://github.com/irishkiwi007/circuit-breaker-featherless)")
 
 if st.button("🔄 Refresh"):
     st.rerun()
