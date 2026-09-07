@@ -23,6 +23,8 @@ import os
 
 import requests
 
+from execution.trade_logger import log_event
+
 GITHUB_API_BASE = "https://api.github.com"
 NOTE_LABEL = "operator-note"
 
@@ -44,6 +46,7 @@ def fetch_and_consume_remote_notes() -> str:
     """
     token = _token()
     if not token:
+        log_event("remote_feedback_skipped", {"reason": "GITHUB_TOKEN not configured"})
         return ""
 
     headers = {
@@ -59,10 +62,12 @@ def fetch_and_consume_remote_notes() -> str:
         )
         resp.raise_for_status()
         issues = resp.json()
-    except Exception:
+    except Exception as exc:
+        log_event("remote_feedback_fetch_failed", {"error": str(exc), "repo": _repo()})
         return ""
 
     if not issues:
+        log_event("remote_feedback_none_pending", {"repo": _repo()})
         return ""
 
     notes = []
@@ -84,7 +89,8 @@ def fetch_and_consume_remote_notes() -> str:
                     json={"state": "closed"},
                     timeout=10,
                 )
-            except Exception:
-                pass  # Already surfaced to the agent; a failed close just risks a repeat next cycle.
+            except Exception as exc:
+                log_event("remote_feedback_close_failed", {"issue_number": number, "error": str(exc)})
 
+    log_event("remote_feedback_consumed", {"count": len(notes)})
     return "\n\n".join(notes)
