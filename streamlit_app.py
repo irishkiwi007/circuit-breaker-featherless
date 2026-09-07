@@ -438,6 +438,87 @@ def submit_operator_note(note_text: str) -> None:
     resp.raise_for_status()
 
 
+FEEDBACK_ADVISOR_SYSTEM_PROMPT = (
+    "You are a strategic advisor sitting between the operator (a real person) and the live "
+    "autonomous trading agent. This chat itself has no tools and cannot place, close, or modify "
+    "any order -- you are architecturally incapable of trading here. Your only job is to think "
+    "honestly with the operator about an instruction or piece of feedback they intend to send to "
+    "the live agent.\n\n"
+    "Calibrate your response to what kind of input this is:\n"
+    "- A HARD CONSTRAINT on a specific position (e.g. 'don't sell XYZ no matter what', 'never "
+    "close this early') deserves real pushback if it conflicts with sound risk management -- "
+    "explain specifically what could go wrong with an unconditional rule like that, using the "
+    "real account/position context below. Don't just comply silently.\n"
+    "- A PROPOSED STRATEGY CHANGE (position sizing, entry criteria, risk tolerance, which setups "
+    "to favor) deserves serious, substantive engagement -- ask clarifying questions if the "
+    "instruction is ambiguous, and reason about trade-offs rather than just agreeing.\n"
+    "- Something CLEARLY RECKLESS (e.g. 'bet everything on one trade', 'ignore all risk limits') "
+    "should get a direct, plain-spoken 'that's a bad idea, here's why.'\n\n"
+    "Critical: you cannot block or refuse to send anything. The operator has final authority. "
+    "Your pushback is advisory only -- once they decide to send, whatever was actually discussed "
+    "and settled gets sent to the live agent as-is, including if they overrule your pushback. "
+    "Never say or imply that you're preventing something from being sent.\n\n"
+    "Keep responses conversational and concise -- this is a back-and-forth chat, not a report."
+)
+
+
+def feedback_conversation_reply(chat_history: list, account: dict, positions: list) -> str:
+    """
+    One turn of the advisory pushback conversation. chat_history is a
+    list of {"role": "user"|"assistant", "content": str} in order.
+    Returns the assistant's next reply as plain text.
+    """
+    context = (
+        f"Current account equity: ${account.get('equity', 'unknown')}\n"
+        f"Current open positions: {len(positions)} position(s)"
+    )
+    messages = [{"role": "system", "content": f"{FEEDBACK_ADVISOR_SYSTEM_PROMPT}\n\n{context}"}]
+    messages.extend(chat_history)
+
+    client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
+    response = client.chat.completions.create(model=LLM_MODEL, max_tokens=400, messages=messages)
+    return (response.choices[0].message.content or "").strip()
+
+
+def format_transcript_for_agent(chat_history: list) -> str:
+    """
+    Renders the full advisory conversation as plain text for the live
+    agent to read -- its own thoughts, the pushback it received (if
+    any), and where the operator ultimately settled -- rather than
+    just a single final instruction stripped of that context.
+    """
+    lines = ["Operator feedback conversation (advisory chat + final decision):\n"]
+    for msg in chat_history:
+        speaker = "Operator" if msg["role"] == "user" else "Advisor"
+        lines.append(f"{speaker}: {msg['content']}")
+    return "\n\n".join(lines)
+
+
+@st.cache_data(ttl=60)
+def fetch_note_history() -> list:
+    """
+    Closed operator-note issues -- GitHub keeps these permanently, so
+    this is the long-term review record of everything ever sent to
+    the live agent, not just what's currently pending.
+    """
+    if not GITHUB_TOKEN:
+        return []
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/issues",
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            },
+            params={"labels": "operator-note", "state": "all", "sort": "created", "direction": "desc", "per_page": 50},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return []
+
+
 # =================================================================
 # DETAIL VIEW
 # =================================================================
@@ -899,41 +980,86 @@ else:
 
 st.divider()
 
-st.subheader("🔒 Leave Feedback for the Agent")
+st.subheader("🔒 Talk to the Agent")
 st.write(
-    "Unlike the Q&A above, this actually reaches the live trading agent's own decision-making "
-    "context on its next cycle — passcode required, since this box is publicly visible."
+    "Unlike the Q&A above, what you settle on here actually reaches the live trading agent's own "
+    "decision-making context on its next cycle — passcode required, since this box is publicly visible. "
+    "The advisor will push back if it disagrees, but it can't block anything from being sent — that's "
+    "your call."
 )
 
 if not GITHUB_TOKEN or not DASHBOARD_FEEDBACK_PASSCODE:
     st.info("Operator feedback isn't configured on this dashboard yet.")
 else:
-    if "feedback_sent" not in st.session_state:
-        st.session_state.feedback_sent = False
+    if "feedback_authed" not in st.session_state:
+        st.session_state.feedback_authed = False
+    if "feedback_chat" not in st.session_state:
+        st.session_state.feedback_chat = []
+    if "feedback_final_sent" not in st.session_state:
+        st.session_state.feedback_final_sent = False
 
-    with st.form("operator_note_form", clear_on_submit=True):
-        entered_passcode = st.text_input("Passcode", type="password")
-        note_text = st.text_area(
-            "Note for the agent",
-            placeholder="e.g. Widen the IV rank filter today, or: hold off on new NVDA positions until further notice.",
+    if not st.session_state.feedback_authed:
+        entered_passcode = st.text_input("Passcode to start", type="password", key="feedback_passcode_entry")
+        if st.button("Unlock"):
+            if entered_passcode == DASHBOARD_FEEDBACK_PASSCODE:
+                st.session_state.feedback_authed = True
+                st.rerun()
+            else:
+                st.error("Incorrect passcode.")
+    else:
+        for msg in st.session_state.feedback_chat:
+            role_label = "You" if msg["role"] == "user" else "Advisor"
+            with st.container(border=True):
+                st.markdown(f"**{role_label}:**")
+                st.write(msg["content"])
+
+        user_turn = st.text_area(
+            "Your message",
+            key="feedback_turn_input",
+            placeholder="e.g. Don't sell XYZ under any circumstances — or: I want to shift toward wider deltas.",
         )
-        submitted = st.form_submit_button("Send to agent", type="primary")
+        col1, col2 = st.columns(2)
+        with col1:
+            send_turn = st.button("Send message", type="primary")
+        with col2:
+            finalize = st.button("✅ Finalize & send to agent", disabled=not st.session_state.feedback_chat)
 
-    if submitted:
-        if entered_passcode != DASHBOARD_FEEDBACK_PASSCODE:
-            st.error("Incorrect passcode.")
-        elif not note_text.strip():
-            st.warning("Note is empty — nothing sent.")
-        else:
+        if send_turn and user_turn.strip():
+            st.session_state.feedback_chat.append({"role": "user", "content": user_turn.strip()})
+            with st.spinner("Thinking..."):
+                try:
+                    reply = feedback_conversation_reply(st.session_state.feedback_chat, account, positions)
+                    st.session_state.feedback_chat.append({"role": "assistant", "content": reply})
+                except Exception as e:
+                    st.session_state.feedback_chat.append({"role": "assistant", "content": f"(couldn't respond: {e})"})
+            st.rerun()
+
+        if finalize:
+            transcript = format_transcript_for_agent(st.session_state.feedback_chat)
             try:
-                submit_operator_note(note_text.strip())
-                st.session_state.feedback_sent = True
+                submit_operator_note(transcript)
+                st.session_state.feedback_chat = []
+                st.session_state.feedback_final_sent = True
+                fetch_note_history.clear()
+                st.rerun()
             except Exception as e:
                 st.error(f"Couldn't send that to the agent right now: {e}")
 
-    if st.session_state.feedback_sent:
-        st.success("Sent — the agent will read this at the start of its next decision cycle.")
-        st.session_state.feedback_sent = False
+    if st.session_state.feedback_final_sent:
+        st.success("Sent — the full conversation will be read by the agent at the start of its next decision cycle.")
+        st.session_state.feedback_final_sent = False
+
+    st.divider()
+    with st.expander("📜 Feedback History (all past conversations, for review)"):
+        history = fetch_note_history()
+        if not history:
+            st.caption("No feedback sent yet.")
+        else:
+            for issue in history:
+                status = "✅ delivered" if issue.get("state") == "closed" else "⏳ pending"
+                st.markdown(f"**{format_nyc(issue.get('created_at', ''))} NYC · {status}**")
+                st.text(issue.get("body", ""))
+                st.divider()
 
 st.divider()
 
