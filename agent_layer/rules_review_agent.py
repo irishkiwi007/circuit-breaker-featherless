@@ -80,11 +80,28 @@ class RulesReviewAgent:
         prompt = build_review_prompt(current_values, activity_summary)
         response = self._client.messages.create(
             model=self.config.claude.model,
-            max_tokens=1000,
+            max_tokens=1500,
             system=RULES_REVIEW_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(block.text for block in response.content if hasattr(block, "text"))
+        if not text.strip():
+            # Same failure mode confirmed in performance_reflection.py —
+            # a reasoning-capable model can exhaust its token budget on
+            # internal reasoning before producing visible output. json.loads
+            # on empty text below would raise anyway; this just gives a
+            # clearer, specifically-named reason in the log instead of a
+            # generic JSON parse error.
+            record = {
+                "change_recommended": False,
+                "field": None,
+                "new_value": None,
+                "reasoning": "LLM call returned empty text (likely token budget exhausted by "
+                             "internal reasoning) — no change applied.",
+                "applied": False,
+            }
+            log_event("rules_review_empty_response", record)
+            return record
 
         try:
             parsed = json.loads(_strip_code_fences(text))

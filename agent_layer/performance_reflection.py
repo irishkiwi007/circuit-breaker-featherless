@@ -184,10 +184,28 @@ Write a short, honest reflection (3-5 sentences) on whatever pattern is actually
 
         response = self._client.messages.create(
             model=self.config.claude.model,
-            max_tokens=500,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
         reflection_text = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+
+        if not reflection_text:
+            # Confirmed real failure mode: a reasoning-capable model (e.g.
+            # DeepSeek V4-Pro via Featherless) can spend its entire token
+            # budget on internal reasoning before ever reaching visible
+            # output, especially with a low max_tokens ceiling -- the API
+            # call itself succeeds, but the actual answer comes back
+            # empty. Log this distinctly rather than silently writing a
+            # blank reflection file, which would otherwise inject nothing
+            # useful into the next cycle without anyone knowing why.
+            record = {
+                "generated": False,
+                "reason": "LLM call succeeded but returned empty text -- likely token budget "
+                          "exhausted by internal reasoning before reaching visible output",
+                "new_trade_count": len(new_trades),
+            }
+            log_event("performance_reflection_empty_response", record)
+            return record
 
         record = {
             "generated": True,
