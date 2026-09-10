@@ -23,7 +23,7 @@ from agent_layer.autonomous_prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
 from agent_layer.remote_feedback import fetch_and_consume_remote_notes
 from agent_layer import position_memory
 from execution.alpaca_client import AlpacaExecutionClient
-from execution.trade_logger import log_event
+from execution.trade_logger import log_event, set_cycle_id
 
 DEFAULT_NEXT_CHECK_MINUTES = 15
 MAX_TOOL_ROUNDS_PER_CYCLE = 25  # safety valve against a runaway tool-call loop within one cycle
@@ -153,6 +153,10 @@ class AutonomousTradingAgent:
         until the next cycle should run, as chosen by Claude (or a
         default if parsing fails or the key is missing).
         """
+        import uuid
+        cycle_id = uuid.uuid4().hex[:8]
+        set_cycle_id(cycle_id)
+
         provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
         key_configured = (
             bool(os.getenv("FEATHERLESS_API_KEY")) if provider == "featherless"
@@ -162,7 +166,7 @@ class AutonomousTradingAgent:
             log_event("autonomous_cycle_skipped", {"reason": f"{provider} API key not configured"})
             return DEFAULT_NEXT_CHECK_MINUTES
 
-        log_event("autonomous_cycle_start", {})
+        log_event("autonomous_cycle_start", {"cycle_id": cycle_id})
 
         operator_note = _consume_operator_note()
         performance_reflection = _read_performance_reflection()

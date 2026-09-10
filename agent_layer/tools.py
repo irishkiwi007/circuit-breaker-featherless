@@ -630,7 +630,7 @@ class ToolDispatcher:
 
         async with AlpacaMCPClient(self.config) as mcp:
             orders_result = await mcp.call_tool("get_orders", {"status": "all", "limit": 500})
-            positions_result = await mcp.call_tool("get_positions", {})
+            positions_result = await mcp.call_tool("get_all_positions", {})
             activities_result = await mcp.call_tool("get_account_activities", {"activity_types": "OPEXP"})
 
         orders = unwrap_data(orders_result)
@@ -638,8 +638,11 @@ class ToolDispatcher:
             orders = orders.get("orders", orders.get("data", []))
         positions = unwrap_data(positions_result)
         if isinstance(positions, dict):
-            positions = positions.get("positions", positions.get("data", []))
-        expiry_activities = unwrap_data(activities_result)
+            # Confirmed shape (see execution/alpaca_client.py's
+            # open_positions, verified against a live response): the list
+            # is nested under "result", not "positions" or "data" — this
+            # was silently returning [] even after the tool-name fix above.
+            positions = positions.get("result", [])
         if isinstance(expiry_activities, dict):
             expiry_activities = expiry_activities.get("activities", expiry_activities.get("data", []))
 
@@ -703,11 +706,12 @@ class ToolDispatcher:
         from execution.trade_records import parse_occ_symbol, parse_underlying
 
         async with AlpacaMCPClient(self.config) as mcp:
-            positions_result = await mcp.call_tool("get_positions", {})
+            positions_result = await mcp.call_tool("get_all_positions", {})
 
         positions = unwrap_data(positions_result)
         if isinstance(positions, dict):
-            positions = positions.get("positions", positions.get("data", []))
+            # Same confirmed shape as above — nested under "result".
+            positions = positions.get("result", [])
         positions = positions or []
 
         # Only OCC option symbols carry Greeks — a bare stock/ETF position
@@ -845,25 +849,31 @@ class ToolDispatcher:
         })
 
     async def _get_market_context(self) -> str:
+        # get_index_latest_values is not a real registered MCP tool — this
+        # was the root cause of it failing every single cycle. The working
+        # pattern (confirmed via fast_layer/market_data.py's vix_snapshot,
+        # and via every successful get_stock_quote call tonight) is
+        # get_stock_latest_quote. SPX itself also isn't a standard
+        # Alpaca-quotable symbol; SPY is the real, liquid, always-quotable
+        # proxy for "S&P 500 level" and is what's actually used for signal
+        # generation elsewhere in this codebase.
         async with AlpacaMCPClient(self.config) as mcp:
-            raw = await mcp.call_tool("get_index_latest_values", {"symbols": "VIX,SPX"})
+            raw = await mcp.call_tool("get_stock_latest_quote", {"symbols": "VIX,SPY"})
         data = unwrap_data(raw) or {}
         if isinstance(data, dict) and "data" in data and set(data.keys()) <= {"data", "next_page_token"}:
             data = data["data"]
+        quotes = data.get("quotes", {}) if isinstance(data, dict) else {}
 
         def _extract_value(entry):
-            if entry is None:
+            if not isinstance(entry, dict):
                 return None
-            if isinstance(entry, (int, float)):
-                return float(entry)
-            if isinstance(entry, dict):
-                for key in ("value", "price", "close", "latestValue"):
-                    if key in entry and entry[key] is not None:
-                        return float(entry[key])
+            for key in ("bidPrice", "bp", "askPrice", "ap"):
+                if key in entry and entry[key] is not None:
+                    return float(entry[key])
             return None
 
-        vix = _extract_value(data.get("VIX")) if isinstance(data, dict) else None
-        spx = _extract_value(data.get("SPX")) if isinstance(data, dict) else None
+        vix = _extract_value(quotes.get("VIX"))
+        spy = _extract_value(quotes.get("SPY"))
 
         if vix is None:
             regime = "unknown"
@@ -878,12 +888,14 @@ class ToolDispatcher:
 
         return json.dumps({
             "vix": vix,
-            "spx": spx,
+            "spy": spy,
             "vix_regime": regime,
             "note": (
                 "Index levels only — this does NOT include scheduled macro events (Fed meetings, "
-                "CPI/jobs releases) or news headlines. A missing vix/spx value means the underlying "
-                "get_index_latest_values call returned no data for that symbol, not that the market is closed."
+                "CPI/jobs releases) or news headlines. spy is the S&P 500 ETF proxy (SPX itself "
+                "isn't a standard quotable symbol on this feed). A missing vix/spy value means the "
+                "underlying quote call returned no data for that symbol right now, not that the "
+                "market is closed."
             ),
         })
 
