@@ -13,8 +13,9 @@ import json
 from datetime import date
 
 from execution.mcp_client import AlpacaMCPClient, unwrap_data
-from risk.hard_backstops import check_defined_risk, check_position_sizing, check_spread_economics
 from execution.trade_logger import log_event
+from risk.hard_backstops import check_defined_risk, check_position_sizing, check_spread_economics
+from agent_layer import position_memory
 from config import CONFIG
 
 TOOL_SCHEMAS = [
@@ -537,6 +538,19 @@ class ToolDispatcher:
         order_data = unwrap_data(result) or {}
         order_id = order_data.get("id") if isinstance(order_data, dict) else None
         order_status = order_data.get("status") if isinstance(order_data, dict) else None
+
+        # Capture/clear the position's thesis regardless of whether this
+        # order has actually filled yet — if it never fills, the live
+        # position never appears and position_memory.prune_closed() in
+        # autonomous_agent.py's per-cycle brief will remove the stale
+        # entry on its own next cycle. Recording at submission (not fill)
+        # keeps this simple and avoids needing to correlate an async fill
+        # event back to this specific order later.
+        if action == "open":
+            position_memory.record_entry(buy_symbol, sell_symbol, underlying, rationale, limit_price)
+        else:
+            position_memory.clear_entry(buy_symbol, sell_symbol)
+
         return json.dumps({
             "rejected": False,
             "order_result": result,

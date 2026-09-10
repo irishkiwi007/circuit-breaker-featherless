@@ -21,6 +21,7 @@ from agent_layer.llm_client import get_client
 from agent_layer.tools import TOOL_SCHEMAS, ToolDispatcher
 from agent_layer.autonomous_prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
 from agent_layer.remote_feedback import fetch_and_consume_remote_notes
+from agent_layer import position_memory
 from execution.alpaca_client import AlpacaExecutionClient
 from execution.trade_logger import log_event
 
@@ -70,6 +71,76 @@ def _read_performance_reflection() -> str:
         return f.read().strip()
 
 
+async def _build_position_thesis_brief(config) -> str:
+    """
+    Structurally resurfaces, every cycle, the two facts a genuine
+    re-evaluation of an open position needs and that free-text log
+    history reliably loses track of: why it was entered, and how far
+    its value has fallen from its best point. This is deliberately
+    NOT an exit rule or a threshold of any kind — nothing here tells
+    the agent what to decide, only what's true. The decision, sizing,
+    and timing remain entirely the agent's own judgment call.
+
+    Computed directly from live Alpaca data each cycle, not from the
+    agent's own memory of past cycles, which is exactly the channel
+    that was losing this information before.
+    """
+    try:
+        live_positions = await AlpacaExecutionClient(config).open_positions()
+    except Exception as exc:
+        log_event("position_thesis_brief_failed", {"error": str(exc)})
+        return ""
+
+    if not live_positions:
+        return ""
+
+    live_symbols = {p.get("symbol") for p in live_positions}
+    by_symbol = {p.get("symbol"): p for p in live_positions}
+    theses = position_memory.all_records()
+
+    live_keys = {
+        key for key, r in theses.items()
+        if r["buy_symbol"] in live_symbols and r["sell_symbol"] in live_symbols
+    }
+    position_memory.prune_closed(live_keys)
+    if not live_keys:
+        return ""
+
+    lines = [
+        "Your open positions' original theses (peak value vs. current — this is context for your own "
+        "re-evaluation, not an instruction; you decide whether each thesis still holds):"
+    ]
+    for key in live_keys:
+        record = theses[key]
+        long_pos = by_symbol.get(record["buy_symbol"])
+        short_pos = by_symbol.get(record["sell_symbol"])
+        try:
+            current_value = float(long_pos.get("current_price", 0) or 0) - float(short_pos.get("current_price", 0) or 0)
+        except (TypeError, ValueError):
+            current_value = None
+
+        if current_value is not None:
+            position_memory.set_peak_if_higher(record["buy_symbol"], record["sell_symbol"], current_value)
+
+        # Re-read after the possible peak update above, so the line
+        # reflects the true current peak rather than a stale one.
+        peak_value = position_memory.all_records().get(key, record)["peak_net_value"]
+        entry_value = record["entry_net_value"]
+
+        line = (
+            f"- {record['underlying']} ({record['buy_symbol']}/{record['sell_symbol']}): "
+            f"entered at ${entry_value:.2f}/spread because \"{record['thesis']}\". "
+            f"Peak value since entry: ${peak_value:.2f}/spread"
+            + (f", currently ${current_value:.2f}/spread" if current_value is not None else " (current value unavailable this cycle)")
+        )
+        if current_value is not None and peak_value > entry_value and current_value < peak_value:
+            given_back = peak_value - current_value
+            line += f". Has given back ${given_back:.2f}/spread from its peak."
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 class AutonomousTradingAgent:
     def __init__(self, config=CONFIG):
         self.config = config
@@ -95,11 +166,15 @@ class AutonomousTradingAgent:
 
         operator_note = _consume_operator_note()
         performance_reflection = _read_performance_reflection()
+        position_thesis_brief = await _build_position_thesis_brief(self.config)
         opening_text = (
             "Begin this decision cycle. Check whatever account, position, and market information "
             "you need, decide whether to act, and act if warranted within your limits. End with "
             "your summary and the NEXT_CHECK_MINUTES line."
         )
+        if position_thesis_brief:
+            log_event("position_thesis_brief_injected", {"brief": position_thesis_brief})
+            opening_text = f"{position_thesis_brief}\n\n{opening_text}"
         if performance_reflection:
             log_event("performance_reflection_injected", {"reflection": performance_reflection})
             opening_text = (
