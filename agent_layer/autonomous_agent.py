@@ -26,7 +26,7 @@ from execution.alpaca_client import AlpacaExecutionClient
 from execution.trade_logger import log_event, set_cycle_id
 
 DEFAULT_NEXT_CHECK_MINUTES = 15
-MAX_TOOL_ROUNDS_PER_CYCLE = 25  # safety valve against a runaway tool-call loop within one cycle
+MAX_TOOL_ROUNDS_PER_CYCLE = 15  # lowered from 25 -- credit/cost control: every round both resends the whole growing conversation AND costs a separate billed request
 OPERATOR_NOTE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "OPERATOR_NOTE")
 PERFORMANCE_REFLECTION_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "PERFORMANCE_REFLECTION")
 
@@ -73,6 +73,23 @@ def _read_performance_reflection() -> str:
 
 async def _build_position_thesis_brief(config) -> str:
     """
+    Thin safety wrapper — see _build_position_thesis_brief_inner for the
+    actual logic. Nothing in this new-tonight code path may ever be able
+    to crash a cycle; a prior version only protected the first API call,
+    which let an unhandled exception elsewhere in this function silently
+    abort an entire cycle (no autonomous_cycle_end logged at all) during
+    a live Alpaca data outage — confirmed via cycle_ids bf89ad42 and
+    0649c051 on 2026-09-11.
+    """
+    try:
+        return await _build_position_thesis_brief_inner(config)
+    except Exception as exc:
+        log_event("position_thesis_brief_failed", {"error": str(exc)})
+        return ""
+
+
+async def _build_position_thesis_brief_inner(config) -> str:
+    """
     Structurally resurfaces, every cycle, the two facts a genuine
     re-evaluation of an open position needs and that free-text log
     history reliably loses track of: why it was entered, and how far
@@ -85,11 +102,7 @@ async def _build_position_thesis_brief(config) -> str:
     agent's own memory of past cycles, which is exactly the channel
     that was losing this information before.
     """
-    try:
-        live_positions = await AlpacaExecutionClient(config).open_positions()
-    except Exception as exc:
-        log_event("position_thesis_brief_failed", {"error": str(exc)})
-        return ""
+    live_positions = await AlpacaExecutionClient(config).open_positions()
 
     if not live_positions:
         return ""
@@ -111,34 +124,79 @@ async def _build_position_thesis_brief(config) -> str:
         "re-evaluation, not an instruction; you decide whether each thesis still holds):"
     ]
     for key in live_keys:
-        record = theses[key]
-        long_pos = by_symbol.get(record["buy_symbol"])
-        short_pos = by_symbol.get(record["sell_symbol"])
         try:
-            current_value = float(long_pos.get("current_price", 0) or 0) - float(short_pos.get("current_price", 0) or 0)
-        except (TypeError, ValueError):
-            current_value = None
+            record = theses[key]
+            long_pos = by_symbol.get(record["buy_symbol"])
+            short_pos = by_symbol.get(record["sell_symbol"])
+            try:
+                current_value = float(long_pos.get("current_price", 0) or 0) - float(short_pos.get("current_price", 0) or 0)
+            except (TypeError, ValueError, AttributeError):
+                current_value = None
 
-        if current_value is not None:
-            position_memory.set_peak_if_higher(record["buy_symbol"], record["sell_symbol"], current_value)
+            if current_value is not None:
+                position_memory.set_peak_if_higher(record["buy_symbol"], record["sell_symbol"], current_value)
 
-        # Re-read after the possible peak update above, so the line
-        # reflects the true current peak rather than a stale one.
-        peak_value = position_memory.all_records().get(key, record)["peak_net_value"]
-        entry_value = record["entry_net_value"]
+            # Re-read after the possible peak update above, so the line
+            # reflects the true current peak rather than a stale one.
+            peak_value = position_memory.all_records().get(key, record)["peak_net_value"]
+            entry_value = record["entry_net_value"]
 
-        line = (
-            f"- {record['underlying']} ({record['buy_symbol']}/{record['sell_symbol']}): "
-            f"entered at ${entry_value:.2f}/spread because \"{record['thesis']}\". "
-            f"Peak value since entry: ${peak_value:.2f}/spread"
-            + (f", currently ${current_value:.2f}/spread" if current_value is not None else " (current value unavailable this cycle)")
-        )
-        if current_value is not None and peak_value > entry_value and current_value < peak_value:
-            given_back = peak_value - current_value
-            line += f". Has given back ${given_back:.2f}/spread from its peak."
-        lines.append(line)
+            line = (
+                f"- {record['underlying']} ({record['buy_symbol']}/{record['sell_symbol']}): "
+                f"entered at ${entry_value:.2f}/spread because \"{record['thesis']}\". "
+                f"Peak value since entry: ${peak_value:.2f}/spread"
+                + (f", currently ${current_value:.2f}/spread" if current_value is not None else " (current value unavailable this cycle)")
+            )
+            if current_value is not None and peak_value > entry_value and current_value < peak_value:
+                given_back = peak_value - current_value
+                line += f". Has given back ${given_back:.2f}/spread from its peak."
+            lines.append(line)
+        except Exception as exc:
+            # One position's data being malformed (e.g. mid-outage,
+            # partial/unexpected API response) must never be able to take
+            # down the whole cycle -- this new code had exactly that gap
+            # until now: only the initial fetch was protected, nothing
+            # in this per-position processing loop was.
+            log_event("position_thesis_brief_line_failed", {"key": key, "error": str(exc)})
+            continue
 
     return "\n".join(lines)
+
+
+KEEP_FULL_TOOL_RESULT_ROUNDS = 6  # only the most recent N rounds' raw tool results stay in
+# full context; older ones get compacted. Real cost driver on a long cycle: every round
+# resends the ENTIRE conversation so far, so full tool-result JSON from round 1 (option
+# chains, position dumps, etc.) was still being resent at full size in round 20, growing
+# every single round for the rest of the cycle — the dominant contributor to per-cycle
+# token/credit cost, not any individual call.
+
+
+def _compact_old_round_if_needed(messages: list, current_round_num: int) -> None:
+    """
+    Once a round falls more than KEEP_FULL_TOOL_RESULT_ROUNDS behind the current one,
+    truncate its tool_result content in place. Leaves the assistant's own reasoning text
+    for that round untouched (cheap, and carries the actual decision narrative forward) —
+    only the bulky raw tool-call JSON gets compacted, and only once each round ever needs it.
+    """
+    round_to_compact = current_round_num - KEEP_FULL_TOOL_RESULT_ROUNDS
+    if round_to_compact < 0:
+        return
+    msg_index = 2 * round_to_compact + 2  # position of that round's tool-result (user) message
+    if msg_index >= len(messages):
+        return
+    msg = messages[msg_index]
+    if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
+        return
+    for block in msg["content"]:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            original = block.get("content", "")
+            if isinstance(original, str) and len(original) > 300:
+                block["content"] = (
+                    original[:300]
+                    + f"... [truncated — {len(original)} chars total; an older round's raw tool "
+                      f"result, compacted to bound this cycle's context size. Your own reasoning "
+                      f"conclusion from that round, just above, is unaffected.]"
+                )
 
 
 class AutonomousTradingAgent:
@@ -229,6 +287,7 @@ class AutonomousTradingAgent:
                     "content": result_text,
                 })
             messages.append({"role": "user", "content": tool_results})
+            _compact_old_round_if_needed(messages, round_num)
 
         else:
             log_event("autonomous_cycle_max_rounds_hit", {"max_rounds": MAX_TOOL_ROUNDS_PER_CYCLE})

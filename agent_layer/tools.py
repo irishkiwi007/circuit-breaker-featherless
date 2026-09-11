@@ -643,6 +643,7 @@ class ToolDispatcher:
             # is nested under "result", not "positions" or "data" — this
             # was silently returning [] even after the tool-name fix above.
             positions = positions.get("result", [])
+        expiry_activities = unwrap_data(activities_result)
         if isinstance(expiry_activities, dict):
             expiry_activities = expiry_activities.get("activities", expiry_activities.get("data", []))
 
