@@ -364,12 +364,18 @@ if not isinstance(expiry_activities, list):
 trades = build_trade_records(all_orders, positions, expiry_activities)
 
 
-def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_records: list) -> str:
+def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_records: list, qa_history: list = None) -> str:
     """
     Answers a question about the agent's real recent activity, using
     only data this dashboard already has. No tools are passed to this
     API call -- there is nothing here that can place, close, or modify
     a trade, by construction, not by instruction alone.
+
+    qa_history (most-recent-first, as stored in st.session_state.qa_history)
+    is included as real conversation turns so a follow-up like "clarify
+    that" or "what did you mean" has the prior exchange to refer back to
+    -- previously this was display-only and never actually reached the
+    model, so every question was answered with zero memory of the last one.
     """
     recent_reasoning = reasoning_records[-15:] if reasoning_records else []
     reasoning_text = "\n".join(
@@ -401,14 +407,19 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
         "that they don't exist -- but note you can't run them from this Q&A box."
     )
 
+    messages = [{"role": "system", "content": system_prompt}]
+    # qa_history is stored most-recent-first (insert(0, ...) at the call
+    # site) — reverse it so the model sees the real chronological order.
+    for pair in reversed(qa_history or []):
+        messages.append({"role": "user", "content": pair["q"]})
+        messages.append({"role": "assistant", "content": pair["a"]})
+    messages.append({"role": "user", "content": f"Context on your recent activity:\n\n{context}\n\nQuestion: {question}"})
+
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
     response = client.chat.completions.create(
         model=LLM_MODEL,
         max_tokens=1500,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Context on your recent activity:\n\n{context}\n\nQuestion: {question}"},
-        ],
+        messages=messages,
     )
     answer = (response.choices[0].message.content or "").strip()
     if not answer:
@@ -980,7 +991,7 @@ else:
         with st.spinner("Thinking..."):
             try:
                 reasoning_records = fetch_reasoning_export()
-                answer = ask_agent_isolated(question.strip(), account, positions, reasoning_records)
+                answer = ask_agent_isolated(question.strip(), account, positions, reasoning_records, st.session_state.qa_history)
                 st.session_state.qa_history.insert(0, {"q": question.strip(), "a": answer})
             except Exception as e:
                 st.error(f"Couldn't get an answer right now: {e}")
