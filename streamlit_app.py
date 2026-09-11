@@ -364,7 +364,68 @@ if not isinstance(expiry_activities, list):
 trades = build_trade_records(all_orders, positions, expiry_activities)
 
 
-def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_records: list, qa_history: list = None) -> str:
+def _build_full_account_context(account: dict, positions: list, trades: list, reasoning_records: list) -> str:
+    """
+    Everything this dashboard actually knows about the account, in one
+    place, for both chat functions to share. Previously each chat had
+    its own thin, independently-hand-picked context (just equity count
+    and a position count) even though the dashboard itself computes and
+    displays starting equity, realized P&L, win rate, fees, and full
+    trade detail elsewhere on the same page — none of which ever
+    reached either chat. This is why it couldn't answer "what's the
+    starting bank" despite that number being on-screen the whole time.
+    """
+    current_equity = float(account.get("equity", 0))
+    funds_committed = abs(sum(float(p.get("cost_basis", 0) or 0) for p in positions))
+    open_unrealized = sum(float(p.get("unrealized_pl", 0) or 0) for p in positions)
+    closed = [t for t in trades if t["status"] == "closed"]
+    open_t = [t for t in trades if t["status"] == "open"]
+    wins = [t for t in closed if t["profit_loss"] == "win"]
+    losses = [t for t in closed if t["profit_loss"] == "loss"]
+    total_realized = (current_equity - STARTING_EQUITY) - open_unrealized
+    win_rate = (len(wins) / len(closed) * 100) if closed else None
+
+    lines = [
+        f"Starting bank: ${STARTING_EQUITY:,.2f}",
+        f"Current equity: ${current_equity:,.2f}",
+        f"Cash available: ${current_equity - funds_committed:,.2f}",
+        f"Funds committed to open positions: ${funds_committed:,.2f}",
+        f"Unrealized P&L (open positions): ${open_unrealized:,.2f}",
+        f"Realized P&L (all closed trades, fee-inclusive): ${total_realized:,.2f}",
+        f"Total fees paid: ${total_fees:,.2f}" if "total_fees" in globals() else "",
+        f"Trades — open: {len(open_t)}, closed: {len(closed)}, wins: {len(wins)}, losses: {len(losses)}"
+        + (f", win rate: {win_rate:.0f}%" if win_rate is not None else ""),
+        f"Options trading level: {account.get('options_trading_level', '—')}",
+        f"Account status: {account.get('status', '—')}",
+        "",
+        "Open positions (underlying, class, contracts, outcome so far):",
+    ]
+    for t in open_t:
+        lines.append(f"- {t['underlying']} ({t['class']}, {t['qty']} contracts): unrealized ${t['outcome']:,.2f}")
+    if not open_t:
+        lines.append("- None")
+
+    lines.append("")
+    lines.append("Recent closed trades (most recent first, up to 10):")
+    for t in sorted(closed, key=lambda x: x.get("time_closed") or "", reverse=True)[:10]:
+        lines.append(
+            f"- {t['underlying']} ({t['class']}, {t['qty']} contracts): "
+            f"{t['profit_loss'] or '—'}, outcome ${t['outcome']:,.2f}, closed {t.get('time_closed', '—')}"
+        )
+    if not closed:
+        lines.append("- None")
+
+    recent_reasoning = reasoning_records[-15:] if reasoning_records else []
+    if recent_reasoning:
+        lines.append("")
+        lines.append(f"Recent trade reasoning (most recent {len(recent_reasoning)} entries):")
+        for r in recent_reasoning:
+            lines.append(f"[{r.get('timestamp')}] {r.get('action')} {r.get('underlying')}: {r.get('rationale', '')[:300]}")
+
+    return "\n".join(line for line in lines if line != "")
+
+
+def ask_agent_isolated(question: str, account: dict, positions: list, trades: list, reasoning_records: list, qa_history: list = None) -> str:
     """
     Answers a question about the agent's real recent activity, using
     only data this dashboard already has. No tools are passed to this
@@ -377,17 +438,7 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
     -- previously this was display-only and never actually reached the
     model, so every question was answered with zero memory of the last one.
     """
-    recent_reasoning = reasoning_records[-15:] if reasoning_records else []
-    reasoning_text = "\n".join(
-        f"[{r.get('timestamp')}] {r.get('action')} {r.get('underlying')}: {r.get('rationale', '')[:300]}"
-        for r in recent_reasoning
-    ) or "No recent reasoning synced yet."
-
-    context = (
-        f"Current account equity: ${account.get('equity', 'unknown')}\n"
-        f"Current open positions: {len(positions)} position(s)\n\n"
-        f"Recent trade reasoning (most recent {len(recent_reasoning)} entries):\n{reasoning_text}"
-    )
+    context = _build_full_account_context(account, positions, trades, reasoning_records)
 
     system_prompt = (
         "You are answering a question from someone viewing your public trading dashboard, "
@@ -484,16 +535,13 @@ FEEDBACK_ADVISOR_SYSTEM_PROMPT = (
 )
 
 
-def feedback_conversation_reply(chat_history: list, account: dict, positions: list) -> str:
+def feedback_conversation_reply(chat_history: list, account: dict, positions: list, trades: list, reasoning_records: list) -> str:
     """
     One turn of the advisory pushback conversation. chat_history is a
     list of {"role": "user"|"assistant", "content": str} in order.
     Returns the assistant's next reply as plain text.
     """
-    context = (
-        f"Current account equity: ${account.get('equity', 'unknown')}\n"
-        f"Current open positions: {len(positions)} position(s)"
-    )
+    context = _build_full_account_context(account, positions, trades, reasoning_records)
     messages = [{"role": "system", "content": f"{FEEDBACK_ADVISOR_SYSTEM_PROMPT}\n\n{context}"}]
     messages.extend(chat_history)
 
@@ -994,7 +1042,7 @@ else:
         with st.spinner("Thinking..."):
             try:
                 reasoning_records = fetch_reasoning_export()
-                answer = ask_agent_isolated(question.strip(), account, positions, reasoning_records, st.session_state.qa_history)
+                answer = ask_agent_isolated(question.strip(), account, positions, trades, reasoning_records, st.session_state.qa_history)
                 st.session_state.qa_history.insert(0, {"q": question.strip(), "a": answer})
             except Exception as e:
                 st.error(f"Couldn't get an answer right now: {e}")
@@ -1054,7 +1102,7 @@ else:
             st.session_state.feedback_chat.append({"role": "user", "content": user_turn.strip()})
             with st.spinner("Thinking..."):
                 try:
-                    reply = feedback_conversation_reply(st.session_state.feedback_chat, account, positions)
+                    reply = feedback_conversation_reply(st.session_state.feedback_chat, account, positions, trades, fetch_reasoning_export())
                     st.session_state.feedback_chat.append({"role": "assistant", "content": reply})
                 except Exception as e:
                     st.session_state.feedback_chat.append({"role": "assistant", "content": f"(couldn't respond: {e})"})
