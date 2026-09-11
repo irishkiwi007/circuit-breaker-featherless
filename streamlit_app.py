@@ -404,13 +404,21 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
     response = client.chat.completions.create(
         model=LLM_MODEL,
-        max_tokens=500,
+        max_tokens=1500,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Context on your recent activity:\n\n{context}\n\nQuestion: {question}"},
         ],
     )
-    return (response.choices[0].message.content or "").strip()
+    answer = (response.choices[0].message.content or "").strip()
+    if not answer:
+        # Confirmed failure mode (same root cause as the reflection-agent
+        # bug fixed on the VM side): a reasoning-capable model can exhaust
+        # its token budget on internal reasoning before producing any
+        # visible output, so the API call succeeds but returns nothing.
+        # Surface this plainly instead of silently rendering a blank answer.
+        return "(No response generated — the model may have used its full token budget on internal reasoning. Try rephrasing more concisely, or try again.)"
+    return answer
 
 
 def submit_operator_note(note_text: str) -> None:
@@ -476,8 +484,12 @@ def feedback_conversation_reply(chat_history: list, account: dict, positions: li
     messages.extend(chat_history)
 
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
-    response = client.chat.completions.create(model=LLM_MODEL, max_tokens=400, messages=messages)
-    return (response.choices[0].message.content or "").strip()
+    response = client.chat.completions.create(model=LLM_MODEL, max_tokens=1500, messages=messages)
+    reply = (response.choices[0].message.content or "").strip()
+    if not reply:
+        # Same failure mode as ask_agent_isolated above — see its comment.
+        return "(No response generated — the model may have used its full token budget on internal reasoning. Try rephrasing more concisely, or try again.)"
+    return reply
 
 
 def format_transcript_for_agent(chat_history: list) -> str:
