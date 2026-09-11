@@ -448,7 +448,8 @@ def ask_agent_isolated(question: str, account: dict, positions: list, trades: li
         "anything. Nothing you say here will be shown to your trading-cycle self or affect "
         "what you do next cycle. Base your answer only on the real context provided; if you "
         "don't have enough information to answer confidently, say so rather than guessing. "
-        "Keep it to a few sentences -- this is a dashboard, not a report.\n\n"
+        "Keep it to a few sentences -- this is a dashboard, not a report. Answer directly; don't "
+        "spend excessive effort deliberating internally before responding.\n\n"
         "For context only (you still can't call these here): your live trading-cycle self "
         "has get_setup_performance (win rate/P&L by setup type), get_portfolio_greeks (net "
         "delta/theta/vega across open positions), get_order_fill_status (real fill price "
@@ -469,7 +470,7 @@ def ask_agent_isolated(question: str, account: dict, positions: list, trades: li
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
     response = client.chat.completions.create(
         model=LLM_MODEL,
-        max_tokens=1500,
+        max_tokens=4000,
         messages=messages,
     )
     answer = (response.choices[0].message.content or "").strip() if response.choices else ""
@@ -531,7 +532,8 @@ FEEDBACK_ADVISOR_SYSTEM_PROMPT = (
     "Your pushback is advisory only -- once they decide to send, whatever was actually discussed "
     "and settled gets sent to the live agent as-is, including if they overrule your pushback. "
     "Never say or imply that you're preventing something from being sent.\n\n"
-    "Keep responses conversational and concise -- this is a back-and-forth chat, not a report."
+    "Keep responses conversational and concise -- this is a back-and-forth chat, not a report. "
+    "Answer directly; don't spend excessive effort deliberating internally before responding."
 )
 
 
@@ -546,7 +548,7 @@ def feedback_conversation_reply(chat_history: list, account: dict, positions: li
     messages.extend(chat_history)
 
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
-    response = client.chat.completions.create(model=LLM_MODEL, max_tokens=1500, messages=messages)
+    response = client.chat.completions.create(model=LLM_MODEL, max_tokens=4000, messages=messages)
     reply = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not reply:
         # Same failure mode as ask_agent_isolated above — see its comment.
