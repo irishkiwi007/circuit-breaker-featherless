@@ -1036,9 +1036,12 @@ if "qa_history" not in st.session_state:
 if not FEATHERLESS_API_KEY:
     st.info("Q&A isn't configured on this dashboard yet.")
 else:
-    question = st.text_input("Your question", key="qa_question", label_visibility="collapsed",
-                              placeholder="e.g. Why did you hold NVDA overnight instead of taking profit?")
-    if st.button("Ask", type="primary") and question.strip():
+    with st.form("qa_form", clear_on_submit=True):
+        question = st.text_input("Your question", key="qa_question", label_visibility="collapsed",
+                                  placeholder="e.g. Why did you hold NVDA overnight instead of taking profit?")
+        submitted = st.form_submit_button("Ask", type="primary")
+
+    if submitted and question.strip():
         with st.spinner("Thinking..."):
             try:
                 reasoning_records = fetch_reasoning_export()
@@ -1087,16 +1090,17 @@ else:
                 st.markdown(f"**{role_label}:**")
                 st.write(msg["content"])
 
-        user_turn = st.text_area(
-            "Your message",
-            key="feedback_turn_input",
-            placeholder="e.g. Don't sell XYZ under any circumstances — or: I want to shift toward wider deltas.",
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            send_turn = st.button("Send message", type="primary")
-        with col2:
-            finalize = st.button("✅ Finalize & send to agent", disabled=not st.session_state.feedback_chat)
+        with st.form("feedback_turn_form", clear_on_submit=True):
+            user_turn = st.text_area(
+                "Your message",
+                key="feedback_turn_input",
+                placeholder="e.g. Don't sell XYZ under any circumstances — or: I want to shift toward wider deltas.",
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                send_turn = st.form_submit_button("Send message", type="primary")
+            with col2:
+                finalize = st.form_submit_button("✅ Finalize & send to agent", disabled=not st.session_state.feedback_chat)
 
         if send_turn and user_turn.strip():
             st.session_state.feedback_chat.append({"role": "user", "content": user_turn.strip()})
