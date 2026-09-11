@@ -421,14 +421,17 @@ def ask_agent_isolated(question: str, account: dict, positions: list, reasoning_
         max_tokens=1500,
         messages=messages,
     )
-    answer = (response.choices[0].message.content or "").strip()
+    answer = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not answer:
         # Confirmed failure mode (same root cause as the reflection-agent
         # bug fixed on the VM side): a reasoning-capable model can exhaust
         # its token budget on internal reasoning before producing any
-        # visible output, so the API call succeeds but returns nothing.
+        # visible output, so the API call succeeds but returns nothing --
+        # or, as seen live, returns a response with an empty/None choices
+        # list entirely (response.choices[0] would previously crash with
+        # 'NoneType is not subscriptable' rather than degrading gracefully).
         # Surface this plainly instead of silently rendering a blank answer.
-        return "(No response generated — the model may have used its full token budget on internal reasoning. Try rephrasing more concisely, or try again.)"
+        return "(No response generated — the model may have used its full token budget on internal reasoning, or returned an empty response. Try rephrasing more concisely, or try again.)"
     return answer
 
 
@@ -496,7 +499,7 @@ def feedback_conversation_reply(chat_history: list, account: dict, positions: li
 
     client = OpenAI(api_key=FEATHERLESS_API_KEY, base_url=FEATHERLESS_BASE_URL)
     response = client.chat.completions.create(model=LLM_MODEL, max_tokens=1500, messages=messages)
-    reply = (response.choices[0].message.content or "").strip()
+    reply = (response.choices[0].message.content or "").strip() if response.choices else ""
     if not reply:
         # Same failure mode as ask_agent_isolated above — see its comment.
         return "(No response generated — the model may have used its full token budget on internal reasoning. Try rephrasing more concisely, or try again.)"
